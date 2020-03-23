@@ -1,0 +1,237 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+```{r include=FALSE}
+library(tidyverse)
+library(skimr)
+library(anytime)
+library(data.table)
+library(ggplot2)
+library(stats)
+library(scales)
+options(digits = 2)
+trans <- read.csv('progress/payments.csv')
+trans$transactionDay <- anydate(trans$transactionTime)
+setDT(trans)
+```
+
+# Data Clean 
+
+1.The first step is to convert data from cash-flow basis to accural basis. 
+```{r}
+a <- trans[ ,seq(from=transactionDay, length.out = period, by='month'), by=list(userId,transactionTime)]
+accural <- merge(a, trans, by = c("userId", "transactionTime"))
+names(accural)[3] = 'recurring_month'
+```
+
+
+# Analysis
+1.aggregate data(amount, product count, user count. average paid by use) in monthly bais. 
+
+```{r}
+## amount perspective
+accural[, early_date := min(transactionDay),by = userId]
+accural[,style :=if_else(recurring_month == early_date, 'new','recurring')]
+
+mrr <- accural %>% group_by(format(recurring_month, '%Y-%m'), style) %>% 
+  summarise(sum = sum(price)) %>% spread(key = style, value = sum) %>% ungroup() %>%
+  mutate(total = new + recurring)
+
+mrr <- mrr %>% mutate(churn = lag(total) - recurring,
+               vpct_new = (new/lag(new) - 1) * 100,
+               vpct_recurring = (recurring/lag(recurring)-1) *100,
+               vpct_total = (total/lag(total)-1)*100,
+               vpct_churn = (churn/lag(churn)-1)*100,
+               hpct_new =(new/total)*100,
+               hpct_recurring = (recurring/total)*100,
+               hpct_churn = churn/lag(total)*100)
+
+names(mrr)[1] <- 'month'
+mrr[2:3,][is.na(mrr[2:3,])] <- 0
+mrr <- mrr[complete.cases(mrr),]
+
+#visulization values
+graph_mrr <- 
+  mrr %>% select(month, new, recurring,total, churn) %>% 
+  pivot_longer(names_to = 'variable', values_to = 'value',cols = new:churn)
+  
+
+ggplot(graph_mrr,aes(month))+
+  geom_line(aes(y = value,group = variable, color = variable))+
+  theme(axis.text.x = element_text(angle = 90))+
+  labs(title = 'All Type Revenue Is Increasing',subtitle = 'Concern: churn firstly exceeds new in Nov 2017')+
+  scale_y_continuous(name = 'Amount')
+
+summary(mrr)
+
+```
+
+```{r}
+#visulization vertical percentage 
+graph_mrr_vpct <- 
+  mrr %>% select(month, vpct_new, vpct_recurring, vpct_total, vpct_churn) %>% 
+  pivot_longer(names_to = 'variable', values_to = 'value',cols = -month)
+  
+graph_mrr_vpct_highlight <- graph_mrr_vpct %>% filter(variable == 'vpct_total')
+graph_mrr_vpct_grey <- graph_mrr_vpct %>% filter(variable != 'vpct_total')
+
+ggplot()+
+  geom_line(aes(x = month, y = value,group = variable),data = graph_mrr_vpct_highlight, color = 'tomato')+
+  geom_line(aes(x = month,y = value,group = variable, color = variable),data = graph_mrr_vpct_grey,)+
+  theme(axis.text.x = element_text(angle = 90))+
+  geom_hline(yintercept = 0,color = 'skyblue',linetype="dashed")+
+  labs(title = "Total Revenue Monthly Increasing Rate ",subtitle = 'All type revenue increasing rate is converging to 0')+
+  ylab('Increasing Rate')
+
+
+```
+
+```{r}
+#visulization horizontal percentage 
+graph_mrr_hpct <- 
+  mrr %>% select(month, hpct_new, hpct_recurring, hpct_churn) %>% 
+  pivot_longer(names_to = 'variable', values_to = 'value',cols = -month)
+  
+
+ggplot(graph_mrr_hpct,aes(month),xlab = )+
+  geom_line(aes(y = value,group = variable, color = variable))+
+  scale_color_discrete(labels = c("Churn","New","Recurring"))+
+  scale_y_continuous(name = '% of Total',limits = c(0,100))+
+  geom_hline(yintercept = 50,color = 'red',linetype="dashed")+
+  theme(axis.text.x = element_text(angle = 90))+
+  labs(title = 'Reurring Income Taking Increasing Portion on Total Revenue')
+```
+
+
+```{r}
+## users perspective
+user <- accural %>% group_by(format(recurring_month, '%Y-%m'),style) %>% count()
+
+names(user)[1] <- 'month'
+## paid_by user
+
+user1 <- spread(user,key = style,value = n)
+user1 <- user1[complete.cases(user1),]
+
+user1 <- user1 %>% mutate(total = new + recurring,
+                          churn = lag(total)-recurring)
+
+###basic the same as the mrr don't show it
+abc <- user1 %>% gather(-month,key = 'variable', value = 'value') 
+
+ggplot(abc,aes(x = month))+
+geom_line(aes(y = value, group = variable,color =  variable),)+
+theme(axis.text.x = element_text(angle = 90))+
+scale_color_discrete(name = "Average paid by user", labels = c("Churn User","New User", "Recurring User","Total user"))+
+labs(title ="User Growth Align with MRR Growth")+
+ylab("User number")
+
+new_user_pay <- mrr$new/user1$new
+recurring_user_pay <- mrr$recurring/user1$recurring
+
+### visualizatoin paide_by_user
+paid_by_user <- as.data.frame(cbind(user1,new_user_pay,recurring_user_pay))
+paid_by_user <- paid_by_user[complete.cases(paid_by_user),]
+
+graph_paid_user <- paid_by_user %>% select(month, new_user_pay, recurring_user_pay) %>% gather(key = 'variable', value = 'value',-month)
+
+ggplot(graph_paid_user,aes(x = month))+
+  geom_line(aes(y = value, group = variable,color =  variable),)+
+  theme(axis.text.x = element_text(angle = 90))+
+  ylim(0, 210)+
+  scale_color_discrete(name = "Average paid by user", labels = c("New", "Recurring"))+
+  labs(title ="Slight Increasing Trends on Average Payment of Recurring User",
+       subtitle = "More Fluctuation on New Users")
+
+```
+# product popularity
+```{r}
+product <- accural %>% group_by(format(recurring_month, '%Y-%m')) %>%
+  count(product,style)
+names(product)[1] <- 'month'
+c <- c(1:3,214:246)
+product <- product[-c,]
+
+ggplot(product)+
+  geom_line(aes(month,n,group = style, color = style))+
+  facet_grid(rows = vars(product))+
+  theme(axis.text.x = element_text(angle = 90))+
+  labs(title ="More New Users Choose to Start with Pro Rather Than GURU")+
+  ylab('User Number')
+  
+```
+
+```{r}
+location <- accural %>% group_by(format(recurring_month, '%Y-%m')) %>%
+  count(billingCountry,style)
+names(location)[1] <- 'month'
+c <- c(1:5,354:408)
+location <- location[-c,]
+
+location_wide <- location %>% pivot_wider(names_from = style, values_from = n)
+location_wide[is.na(location_wide)] <- 0
+location_wide = location_wide %>% mutate(total = new + recurring,new_pct = new/total,
+                                         recurring_pct = recurring/total,
+                                         ratio = new/recurring )
+
+
+ggplot(location_wide)+
+  geom_line(aes(x = month,y =ratio,group = billingCountry, color = billingCountry))+
+  theme(axis.text.x = element_text(angle = 90))
+
+ggplot(location_wide)+
+  geom_line(aes(x = month,y =new_pct,group = billingCountry, color = billingCountry))+
+  theme(axis.text.x = element_text(angle = 90))
+
+
+pay <- accural %>% group_by(format(recurring_month, '%Y-%m'),billingCountry, style) %>%
+  summarise(avg = mean(price))
+names(pay)[1] <- 'month'
+
+ggplot(pay)+
+  geom_line(aes(month,avg,group = billingCountry, color = billingCountry))+
+  facet_grid(rows = vars(style))+
+  theme(axis.text.x = element_text(angle = 90))
+
+ggplot(location)+
+  geom_line(aes(month,n,group = style, color = style))+
+  facet_grid(rows = vars(billingCountry))+
+  theme(axis.text.x = element_text(angle = 90))#+
+  #labs(title ="GURU Is The Most Popular Version By New User")+
+  #ylab('User Number')
+```
+
+```{r}
+geo <- accural %>% group_by(format(recurring_month, '%Y-%m'),billingCountry,style) %>% summarise(sum = sum(price))
+names(geo)[1] <- 'month'
+c <- 354:408
+geo <- geo[-c,]
+
+geo_incre <- geo %>% filter(billingCountry == c('India','France') )
+geo_decre <- geo %>% filter(billingCountry != 'India' & billingCountry != 'France' )
+
+#ggplot()+
+  #geom_line(aes(month,sum,group = billingCountry, color = billingCountry),data = #geo_incre)+
+  #geom_line(aes(month,sum,group = billingCountry),color = 'grey',data = geo_decre)+
+  #theme(axis.text.x = element_text(angle = 90))+
+  #labs(title ="GURU Is The Most Popular Version By New User")+
+  #ylab('MRR')
+
+#ggplot(geo)+
+  #geom_line(aes(month,sum,group = billingCountry,color = billingCountry))+
+  #theme(axis.text.x = element_text(angle = 90))
+
+  
+ggplot(geo)+
+  geom_line(aes(month,sum,group = billingCountry, color = billingCountry))+
+  facet_grid(rows = vars(style))+  
+  theme(axis.text.x = element_text(angle = 90))+
+  labs(title ="France and India market are growing fast")+
+  ylab('MRR')
+
+```
